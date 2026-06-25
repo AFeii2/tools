@@ -53,7 +53,7 @@ def modify_ota_cfg(cfgfile):
     if lines:
         lines[2] = generate_version(aic_pack_dir + '/image_cfg.json')
 
-    with open(cfgfile, "w") as f:
+    with open(cfgfile, "w", newline="\n") as f:
         f.writelines(lines)
 
 
