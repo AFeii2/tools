@@ -34,7 +34,7 @@ def clean_files(path_list, outpath):
             op = os.path.join(outpath, p)
             if os.path.exists(op):
                 shutil.rmtree(op, ignore_errors=True)
-                continue
+            continue
         if os.path.exists(p):
             shutil.rmtree(p, ignore_errors=True)
 
@@ -42,14 +42,20 @@ def clean_files(path_list, outpath):
 def install_files(srcpath, dstpath):
     if os.path.exists(srcpath) is False:
         print('src is not exist')
-        os.exit(1)
+        sys.exit(1)
     if os.path.isdir(srcpath):
         fs_mkdir(dstpath)
         root_path = srcpath
         for root, dirs, files in os.walk(srcpath):
+            rdir = os.path.relpath(root, srcpath)
+            if rdir == '.':
+                ddst = dstpath
+            else:
+                ddst = os.path.join(dstpath, rdir)
+            fs_mkdir(ddst)
             for fn in files:
                 fsrc = os.path.join(root, fn)
-                rpath = fsrc.replace(srcpath, '')
+                rpath = os.path.relpath(fsrc, srcpath)
                 fdst = os.path.join(dstpath, rpath)
                 fs_mkdir(os.path.dirname(fdst))
                 fs_copy(fsrc, fdst)
