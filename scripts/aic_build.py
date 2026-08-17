@@ -1851,8 +1851,12 @@ def mkimage_cpio(aic_root, prj_chip, prj_kernel, prj_app, prj_defconfig, rtconfi
     aic_system = platform.system()
 
     CPIO_POST_ACTION += '@echo ' + 'make CPIO image begin...\n'
+    ota_output_name = ''
+    if prj_chip == 'd12x' and prj_app == 'inkjet-print':
+        ota_output_name = ' inkjet-print-ota.cpio'
     CPIO_POST_ACTION += 'python3 ' + aic_script_dir + 'mkcpio.py ' + aic_system\
-        + ' ' + aic_root + ' ' + aic_pack_dir + ' ' + prj_out_dir + '\n'
+        + ' ' + aic_root + ' ' + aic_pack_dir + ' ' + prj_out_dir\
+        + ota_output_name + '\n'
 
     CPIO_POST_ACTION += '@echo ' + 'make CPIO image done...\n'
     return CPIO_POST_ACTION

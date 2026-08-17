@@ -9,6 +9,7 @@ import os
 import sys
 import re
 import json
+import shutil
 import subprocess
 
 aic_scripts = sys.argv[0]
@@ -16,6 +17,7 @@ aic_system = sys.argv[1]
 aic_root = os.path.normpath(sys.argv[2])
 aic_pack_dir = os.path.normpath(sys.argv[3])
 prj_out_dir = os.path.normpath(sys.argv[4])
+ota_output_name = sys.argv[5] if len(sys.argv) > 5 else ''
 
 
 def parse_image_cfg(cfgfile):
@@ -143,6 +145,26 @@ def parse_and_fill_ota_size(cfgfile, value):
         print(f"An error occurred: {e}")
 
 
+def update_first_cpio_checksum(cfgfile):
+    """Refresh the CRC-newc checksum after ota_info.bin is patched."""
+    with open(cfgfile, 'r+b') as file:
+        header = file.read(110)
+        if len(header) != 110 or header[:6] != b'070702':
+            raise RuntimeError("the first CPIO entry is not CRC-newc")
+
+        file_size = int(header[54:62], 16)
+        name_size = int(header[94:102], 16)
+        data_offset = (110 + name_size + 3) & ~3
+        file.seek(data_offset)
+        content = file.read(file_size)
+        if len(content) != file_size:
+            raise RuntimeError("the first CPIO entry is truncated")
+
+        checksum = sum(content) & 0xffffffff
+        file.seek(102)
+        file.write(f'{checksum:08x}'.encode('ascii'))
+
+
 def generate_cpio_bin(datadir, cfgfile, bindir):
 
     ota_info_file = datadir + cfgfile
@@ -199,5 +221,11 @@ os.remove('ota-temp.cfg')
 
 # modify the size to ota.cpio
 parse_and_fill_ota_size('ota.cpio', get_file_size('ota.cpio'))
+update_first_cpio_checksum('ota.cpio')
+
+if ota_output_name:
+    if os.path.basename(ota_output_name) != ota_output_name:
+        raise ValueError('OTA output name must not contain a directory')
+    shutil.copyfile('ota.cpio', ota_output_name)
 
 os.chdir(aic_root)
