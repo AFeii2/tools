@@ -103,6 +103,239 @@ def run_cmd(cmdstr):
         sys.exit(1)
 
 
+def _fat_lfn_checksum(short_name):
+    """Return the VFAT checksum for one 8.3 directory entry."""
+    checksum = 0
+    for byte in short_name:
+        checksum = ((checksum & 1) << 7) + (checksum >> 1) + byte
+        checksum &= 0xFF
+    return checksum
+
+
+def _fat_lfn_entries(filename, short_name):
+    """Build the long-file-name entries that must precede *short_name*."""
+    import struct
+
+    name_data = filename.encode('utf-16le') + b'\x00\x00'
+    units = [name_data[index:index + 2]
+             for index in range(0, len(name_data), 2)]
+    chunks = [units[index:index + 13]
+              for index in range(0, len(units), 13)]
+    checksum = _fat_lfn_checksum(short_name)
+    entries = []
+
+    for index in range(len(chunks), 0, -1):
+        units = chunks[index - 1] + [b'\xff\xff'] * (13 - len(chunks[index - 1]))
+        entry = bytearray(32)
+        entry[0] = index | (0x40 if index == len(chunks) else 0)
+        entry[11] = 0x0F
+        entry[12] = 0
+        entry[13] = checksum
+        entry[26:28] = b'\x00\x00'
+        entry[1:11] = b''.join(units[0:5])
+        entry[14:26] = b''.join(units[5:11])
+        entry[28:32] = b''.join(units[11:13])
+        entries.append(entry)
+    return entries
+
+
+def _fat_lfn_name(entries):
+    """Decode a preceding VFAT entry sequence, or return an empty string."""
+    import struct
+
+    if not entries:
+        return ''
+    chars = []
+    for entry in reversed(entries):
+        data = entry[1:11] + entry[14:26] + entry[28:32]
+        for index in range(0, len(data), 2):
+            value = struct.unpack_from('<H', data, index)[0]
+            if value == 0:
+                return ''.join(chars)
+            if value != 0xFFFF:
+                chars.append(chr(value))
+    return ''.join(chars)
+
+
+def _fat_short_name(entry):
+    """Decode an ASCII 8.3 name for diagnostics and source matching."""
+    base = bytes(entry[0:8]).rstrip(b' ').decode('ascii', errors='replace')
+    ext = bytes(entry[8:11]).rstrip(b' ').decode('ascii', errors='replace')
+    return '{}.{}'.format(base, ext) if ext else base
+
+
+class _FatImage(object):
+    """Small FAT12/16/32 directory writer used to repair mtools Windows LFN output."""
+
+    def __init__(self, image_path):
+        import struct
+
+        self.image_path = image_path
+        with open(image_path, 'rb') as image:
+            self.data = bytearray(image.read())
+        self.bytes_per_sector = struct.unpack_from('<H', self.data, 11)[0]
+        self.sectors_per_cluster = self.data[13]
+        self.reserved_sectors = struct.unpack_from('<H', self.data, 14)[0]
+        self.fat_count = self.data[16]
+        self.root_entry_count = struct.unpack_from('<H', self.data, 17)[0]
+        fat_size16 = struct.unpack_from('<H', self.data, 22)[0]
+        total16 = struct.unpack_from('<H', self.data, 19)[0]
+        total32 = struct.unpack_from('<I', self.data, 32)[0]
+        fat_size32 = struct.unpack_from('<I', self.data, 36)[0]
+        self.fat_size = fat_size16 or fat_size32
+        self.total_sectors = total16 or total32
+        self.root_dir_sectors = ((self.root_entry_count * 32) +
+                                 (self.bytes_per_sector - 1)) // self.bytes_per_sector
+        self.first_data_sector = (self.reserved_sectors + self.fat_count * self.fat_size +
+                                  self.root_dir_sectors)
+        data_sectors = self.total_sectors - self.first_data_sector
+        cluster_count = data_sectors // self.sectors_per_cluster
+        self.fat_type = 12 if cluster_count < 4085 else (16 if cluster_count < 65525 else 32)
+        self.fat_offset = self.reserved_sectors * self.bytes_per_sector
+        self.root_cluster = (struct.unpack_from('<I', self.data, 44)[0]
+                             if self.fat_type == 32 else None)
+
+    def _cluster_offset(self, cluster):
+        sector = self.first_data_sector + (cluster - 2) * self.sectors_per_cluster
+        return sector * self.bytes_per_sector
+
+    def _next_cluster(self, cluster):
+        import struct
+
+        if self.fat_type == 16:
+            value = struct.unpack_from('<H', self.data, self.fat_offset + cluster * 2)[0]
+            return None if value >= 0xFFF8 else value
+        if self.fat_type == 32:
+            value = struct.unpack_from('<I', self.data, self.fat_offset + cluster * 4)[0] & 0x0FFFFFFF
+            return None if value >= 0x0FFFFFF8 else value
+        offset = self.fat_offset + cluster + cluster // 2
+        value = self.data[offset] | (self.data[offset + 1] << 8)
+        value = value >> 4 if cluster & 1 else value & 0x0FFF
+        return None if value >= 0x0FF8 else value
+
+    def _directory_offsets(self, start_cluster=None):
+        if start_cluster is None and self.fat_type != 32:
+            start = (self.reserved_sectors + self.fat_count * self.fat_size) * self.bytes_per_sector
+            return list(range(start, start + self.root_entry_count * 32, 32))
+
+        cluster = self.root_cluster if start_cluster is None else start_cluster
+        offsets = []
+        visited = set()
+        while cluster and cluster not in visited:
+            visited.add(cluster)
+            start = self._cluster_offset(cluster)
+            length = self.sectors_per_cluster * self.bytes_per_sector
+            offsets.extend(range(start, start + length, 32))
+            cluster = self._next_cluster(cluster)
+        return offsets
+
+    def entries(self, start_cluster=None):
+        """Return directory entries and the slot list, stopping at the end marker."""
+        slots = self._directory_offsets(start_cluster)
+        result = []
+        lfn_entries = []
+        end_index = len(slots)
+        for index, offset in enumerate(slots):
+            entry = self.data[offset:offset + 32]
+            if entry[0] == 0:
+                end_index = index
+                break
+            if entry[0] == 0xE5:
+                lfn_entries = []
+                continue
+            if entry[11] == 0x0F:
+                lfn_entries.append(entry)
+                continue
+            result.append({
+                'slot_index': index,
+                'offset': offset,
+                'entry': entry,
+                'lfn_entries': lfn_entries,
+                'name': _fat_lfn_name(lfn_entries) or _fat_short_name(entry),
+                'size': int.from_bytes(entry[28:32], byteorder='little'),
+                'is_dir': bool(entry[11] & 0x10),
+                'cluster': int.from_bytes(entry[26:28], byteorder='little') |
+                           (int.from_bytes(entry[20:22], byteorder='little') << 16),
+            })
+            lfn_entries = []
+        return result, slots, end_index
+
+    def insert_lfn(self, start_cluster, target_slot_index, filename):
+        entries, slots, end_index = self.entries(start_cluster)
+        target = next((item for item in entries if item['slot_index'] == target_slot_index), None)
+        if target is None or target['lfn_entries']:
+            return False
+        lfn_entries = _fat_lfn_entries(filename, target['entry'][0:11])
+        if end_index + len(lfn_entries) >= len(slots):
+            raise RuntimeError('No directory entries available for {}'.format(filename))
+
+        for index in range(end_index - 1, target_slot_index - 1, -1):
+            source = slots[index]
+            dest = slots[index + len(lfn_entries)]
+            self.data[dest:dest + 32] = self.data[source:source + 32]
+        for index, entry in enumerate(lfn_entries):
+            offset = slots[target_slot_index + index]
+            self.data[offset:offset + 32] = entry
+        return True
+
+    def save(self):
+        with open(self.image_path, 'wb') as image:
+            image.write(self.data)
+
+
+def repair_windows_lfn(image_path, source_dir):
+    """Repair Chinese VFAT names lost by the bundled Windows mcopy executable.
+
+    The bundled mcopy converts some Unicode names to an 8.3 alias without adding
+    VFAT entries.  File contents and sizes are correct, so match only unambiguous
+    source files by size and add their standard UTF-16 LFN records in-place.
+    """
+    fat = _FatImage(image_path)
+    repaired = 0
+
+    def repair_directory(source_path, cluster=None):
+        nonlocal repaired
+        entries, _, _ = fat.entries(cluster)
+        source_items = list(os.scandir(source_path))
+        for item in source_items:
+            if item.is_dir():
+                child = next((entry for entry in entries
+                              if entry['is_dir'] and entry['name'].casefold() == item.name.casefold()), None)
+                if child is not None:
+                    repair_directory(item.path, child['cluster'])
+
+        pending = [item for item in source_items
+                   if item.is_file() and not item.name.isascii()]
+        while pending:
+            entries, _, _ = fat.entries(cluster)
+            files_by_size = {}
+            for entry in entries:
+                if not entry['is_dir']:
+                    files_by_size.setdefault(entry['size'], []).append(entry)
+
+            progress = False
+            for item in pending[:]:
+                if any(entry['name'] == item.name for entry in entries):
+                    pending.remove(item)
+                    progress = True
+                    break
+                candidates = [entry for entry in files_by_size.get(item.stat().st_size, [])
+                              if not entry['lfn_entries']]
+                if len(candidates) != 1:
+                    raise RuntimeError('Unable to match FAT entry for {}'.format(item.path))
+                if fat.insert_lfn(cluster, candidates[0]['slot_index'], item.name):
+                    repaired += 1
+                    progress = True
+                    break
+            if not progress:
+                raise RuntimeError('Unable to repair FAT names under {}'.format(source_path))
+
+    repair_directory(source_dir)
+    if repaired:
+        fat.save()
+        print('Repaired {} Windows FAT long file names'.format(repaired))
+
+
 def gen_fatfs(tooldir, srcdir, outimg, volab, imgsiz, sector_siz, cluster):
     sector_cnt = int(imgsiz / sector_siz)
     if platform.system() == 'Linux':
@@ -143,6 +376,7 @@ def gen_fatfs(tooldir, srcdir, outimg, volab, imgsiz, sector_siz, cluster):
         if os.path.exists(srcdir) is True:
             mcopy = '{}mcopy.exe -i {} -s {}\\\\ ::/'.format(tooldir, outimg, srcdir)
             run_cmd(mcopy)
+            repair_windows_lfn(outimg, srcdir)
 
         # gen sparse format
         img2simg = '{}img2simg.exe {} {}.sparse 1024'.format(tooldir, outimg, outimg)
