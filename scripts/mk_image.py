@@ -59,6 +59,7 @@ _CKSUM_ALGO_MAP = {
 # Whether or not to generate the image used by the burner
 BURNER = False
 VERBOSE = False
+IMAGE_BRANCH = None
 
 COLOR_BEGIN = "\033["
 COLOR_RED = COLOR_BEGIN + "41;37m"
@@ -1566,12 +1567,17 @@ def concatenate_create_image(outname, flist, datadir):
             fin.close()
 
 
-def img_gen_fw_file_name(cfg):
+def img_gen_fw_file_name(cfg, branch=None):
     # Image file name format:
-    # <platform>_<product>_v<version>_c<anti-rollback counter>.img
+    # <platform>_<product>_[branch]_v<version>_c<anti-rollback counter>.img
+    if branch is None:
+        branch = IMAGE_BRANCH
     img_file_name = cfg["image"]["info"]["platform"]
     img_file_name += "_"
     img_file_name += cfg["image"]["info"]["product"]
+    if (branch and cfg["image"]["info"]["platform"] == "d12x" and
+            cfg["image"]["info"]["product"] == "inkjet-print"):
+        img_file_name += "_" + branch
     img_file_name += "_v"
     img_file_name += cfg["image"]["info"]["version"]
     if "anti-rollback" in cfg["image"]["info"]:
@@ -1579,6 +1585,22 @@ def img_gen_fw_file_name(cfg):
         img_file_name += cfg["image"]["info"]["anti-rollback"]
     img_file_name += ".img"
     return img_file_name.replace(" ", "_")
+
+
+def get_git_branch(git_root):
+    if not git_root:
+        return None
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=git_root)
+        if not isinstance(branch, str):
+            branch = branch.decode("utf-8", "replace")
+        branch = branch.strip()
+        if branch:
+            return re.sub(r"[^A-Za-z0-9._-]", "_", branch)
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return "unknown"
 
 
 def calc_crc32(fname, size):
@@ -3250,6 +3272,8 @@ if __name__ == "__main__":
                         help="image configuration file name")
     parser.add_argument("-k", "--keydir", type=str,
                         help="key material directory")
+    parser.add_argument("--git-root", type=str,
+                        help="Luban-Lite repository root for image naming")
     parser.add_argument("-e", "--extract", action='store_true',
                         help="extract extension file")
     parser.add_argument("-s", "--sign", action='store_true',
@@ -3282,6 +3306,7 @@ if __name__ == "__main__":
         BURNER = True
     if args.verbose:
         VERBOSE = True
+    IMAGE_BRANCH = get_git_branch(args.git_root)
     if args.extract:
         sys.exit(1)
     if args.config is None:

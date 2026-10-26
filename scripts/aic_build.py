@@ -1643,7 +1643,8 @@ def mkimage_prebuild(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_def
             MAKE_IMG_ARGS = ' -v -b -c '
         else:
             MAKE_IMG_ARGS = ' -v -c '
-        MAKE_IMG_ACTION = MAKE_IMG_TOOL + MAKE_IMG_ARGS + IMG_JSON + ' -d ' + prj_out_dir + '\n'
+        MAKE_IMG_ACTION = MAKE_IMG_TOOL + MAKE_IMG_ARGS + IMG_JSON + ' -d ' + prj_out_dir + \
+            ' --git-root ' + aic_root + '\n'
         POST_ACTION += MAKE_IMG_ACTION
 
     if get_config(prj_root_dir + '.config', ota_enable) == 'y':
