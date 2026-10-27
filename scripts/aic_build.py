@@ -14,6 +14,7 @@ import shutil
 import tarfile
 import hashlib
 import operator
+import subprocess
 from SCons.Script import *
 from collections import namedtuple
 from collections import OrderedDict
@@ -32,6 +33,39 @@ def pr_err(string):
 
 def pr_info(string):
     print(COLOR_WHITE + '>>> ' + string + COLOR_END)
+
+
+_GIT_BRANCH_NAME = None
+
+
+def get_git_branch_name(aic_root):
+    global _GIT_BRANCH_NAME
+    if _GIT_BRANCH_NAME is not None:
+        return _GIT_BRANCH_NAME
+
+    branch = ''
+    try:
+        process = subprocess.Popen(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=aic_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        branch = process.communicate()[0].strip()
+        if branch == 'HEAD':
+            process = subprocess.Popen(
+                ['git', 'rev-parse', '--short', 'HEAD'],
+                cwd=aic_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            branch = 'detached_' + process.communicate()[0].strip()
+    except (OSError, IOError):
+        branch = ''
+
+    if not branch:
+        branch = 'unknown'
+    _GIT_BRANCH_NAME = re.sub(r'[^A-Za-z0-9._-]+', '_', branch)
+    return _GIT_BRANCH_NAME
+
+
+def get_prj_name(aic_root, prj_defconfig):
+    project = prj_defconfig.replace('_defconfig', '')
+    return project + '_' + get_git_branch_name(aic_root)
 
 
 def pr_warn(string):
@@ -330,7 +364,7 @@ def show_info_cmd(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_defcon
         if get_config(config_file, 'CONFIG_ARCH_CSKY'):
             arch = 'csky'
         # out dir
-        prj_name = prj_defconfig.replace('_defconfig', '')
+        prj_name = get_prj_name(aic_root, prj_defconfig)
         prj_out_dir = 'output/' + prj_name
         # toolchain
         toolchain = 'toolchain/bin'
@@ -576,7 +610,7 @@ def aicupg_cmd(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_defconfig
         print('{} does not exist!'.format(upgcmd))
         sys.exit(100)
 
-    solution = get_prj_defconfig(aic_root).replace('_defconfig', '')
+    solution = get_prj_name(aic_root, get_prj_defconfig(aic_root))
     img_path = os.path.join(aic_root, 'output/' + solution + '/images')
     if not os.path.exists(img_path):
         print('{} does not exist! Need build the project first.'.format(img_path))
@@ -615,7 +649,7 @@ def win_menuconfig_cmd(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_d
             if changed:
                 save_defconfig(aic_root)
             # If 'output/xxxx/project_eclipse' folder exists need update eclipse project
-            prj_name = prj_defconfig.replace('_defconfig', '')
+            prj_name = get_prj_name(aic_root, prj_defconfig)
             prj_eclipse_dir = os.path.join(aic_root, 'output', prj_name, 'project_eclipse')
             if not os.path.exists(prj_eclipse_dir):
                 exit(0)
@@ -672,7 +706,7 @@ def run_qemu_cmd(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_defconf
         elif platform.system() == 'Windows':
             qemu_path = os.path.join(aic_root, 'tools/env/tools/qemu/qemu-win', qemu_name)
         # target
-        prj_name = prj_defconfig.replace('_defconfig', '')
+        prj_name = get_prj_name(aic_root, prj_defconfig)
         prj_out_dir = 'output/' + prj_name + '/images/'
         target = os.path.join(aic_root, prj_out_dir, rtconfig.SOC + '.' + rtconfig.TARGET_EXT)
         # complete cmd
@@ -691,7 +725,7 @@ def list_size_cmd(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_defcon
         # size
         gcc_size = os.path.join(aic_root, 'toolchain/bin/riscv64-unknown-elf-size')
         # obj foler
-        prj_name = prj_defconfig.replace('_defconfig', '')
+        prj_name = get_prj_name(aic_root, prj_defconfig)
         prj_out_dir = os.path.join(aic_root, 'output/' + prj_name)
         # target
         chip_path = os.path.join(aic_root, './bsp/artinchip/sys/' + prj_chip)
@@ -966,7 +1000,7 @@ def list_mem_cmd(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_defconf
     list_mem = GetOption('list_mem')
     if list_mem:
         # obj foler
-        prj_name = prj_defconfig.replace('_defconfig', '')
+        prj_name = get_prj_name(aic_root, prj_defconfig)
         prj_out_dir = os.path.join(aic_root, 'output/' + prj_name)
         # target
         chip_path = os.path.join(aic_root, './bsp/artinchip/sys/' + prj_chip)
@@ -1113,7 +1147,7 @@ def distclean_cmd(aic_root, prj_chip, prj_board, prj_kernel, prj_app, prj_defcon
               default=False, help='clean the toolchain and the output folder')
     distclean = GetOption('distclean')
     if distclean:
-        prj_name = prj_defconfig.replace('_defconfig', '')
+        prj_name = get_prj_name(aic_root, prj_defconfig)
         os.system('rm -rf ' + aic_root + '/output/' + prj_name)
         os.system('rm -rf ' + aic_root + '/toolchain')
         os.system('rm -f ' + aic_root + '/.config')
@@ -1821,7 +1855,7 @@ def mkimage_xip_postaction(aic_root, prj_chip, prj_kernel, prj_app, prj_defconfi
         return XIP_POST_ACTION
 
     global prj_out_dir
-    prj_name = prj_defconfig.replace('_defconfig', '')
+    prj_name = get_prj_name(aic_root, prj_defconfig)
     prj_out_dir = os.path.join(aic_root, 'output/' + prj_name + '/images/')
 
     # XIP image post action
@@ -1988,7 +2022,7 @@ def get_prj_post_action(aic_root, prj_chip, prj_board, prj_kernel, prj_app,
     aic_script_dir = os.path.join(aic_root, 'tools/scripts/')
     aic_common_dir = os.path.join(aic_root, 'bsp/artinchip/sys/' + prj_chip)
     aic_pack_dir = os.path.join(aic_root, 'target/' + prj_chip + '/' + prj_board + '/pack/')
-    prj_name = prj_defconfig.replace('_defconfig', '')
+    prj_name = get_prj_name(aic_root, prj_defconfig)
     prj_out_dir = os.path.join(aic_root, 'output/' + prj_name + '/images/')
 
     # make image pre_build cmd
